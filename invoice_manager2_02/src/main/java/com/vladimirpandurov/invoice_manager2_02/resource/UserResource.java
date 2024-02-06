@@ -5,10 +5,12 @@ import com.vladimirpandurov.invoice_manager2_02.domain.User;
 import com.vladimirpandurov.invoice_manager2_02.domain.UserPrincipal;
 import com.vladimirpandurov.invoice_manager2_02.dto.UserDTO;
 import com.vladimirpandurov.invoice_manager2_02.dtomapper.UserDTOMapper;
+import com.vladimirpandurov.invoice_manager2_02.exception.ApiException;
 import com.vladimirpandurov.invoice_manager2_02.form.LoginForm;
 import com.vladimirpandurov.invoice_manager2_02.provider.TokenProvider;
 import com.vladimirpandurov.invoice_manager2_02.service.RoleService;
 import com.vladimirpandurov.invoice_manager2_02.service.UserService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -24,6 +26,9 @@ import java.net.URI;
 import java.time.LocalDateTime;
 import java.util.Map;
 
+import static org.springframework.http.HttpHeaders.AUTHORIZATION;
+import static org.springframework.security.authentication.UsernamePasswordAuthenticationToken.unauthenticated;
+
 @RestController
 @RequestMapping(path = "/user")
 @RequiredArgsConstructor
@@ -35,6 +40,7 @@ public class UserResource {
     private final RoleService roleService;
     private final AuthenticationManager authenticationManager;
     private final TokenProvider tokenProvider;
+    private final String TOKEN_PREFIX = "Bearer ";
 
     @PostMapping("/register")
     public ResponseEntity<HttpResponse> saveUser(@RequestBody @Valid User user){
@@ -51,8 +57,8 @@ public class UserResource {
     }
     @PostMapping("/login")
     public ResponseEntity<HttpResponse> login(@RequestBody @Valid LoginForm loginForm){
-        authenticationManager.authenticate(UsernamePasswordAuthenticationToken.unauthenticated(loginForm.getEmail(), loginForm.getPassword()));
-        UserDTO userDTO = userService.getUserByEmail(loginForm.getEmail());
+        Authentication authentication = authenticate(loginForm.getEmail(), loginForm.getPassword());
+        UserDTO userDTO = getAuthenticatedUser(authentication);
         return userDTO.isUsingMfa() ? sendVerificationCode(userDTO) : sendResponse(userDTO);
     }
 
@@ -74,6 +80,116 @@ public class UserResource {
                 .statusCode(HttpStatus.OK.value())
                 .build()
         );
+    }
+    @GetMapping("/resetpassword/{email}")
+    public ResponseEntity<HttpResponse> resetPassword(@PathVariable("email") String email){
+        userService.resetPassword(email);
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                .timeStamp(LocalDateTime.now().toString())
+                .message("Email sent. Please check your email to reset your password.")
+                .status(HttpStatus.OK)
+                .statusCode(HttpStatus.OK.value())
+                .build()
+        );
+    }
+    @GetMapping("/verify/password/{key}")
+    public ResponseEntity<HttpResponse> verifyPasswordUrl(@PathVariable("key") String key){
+        UserDTO user = userService.verifyPasswordKey(key);
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                .timeStamp(LocalDateTime.now().toString())
+                .data(Map.of("user", user))
+                .message("Please enter a new password")
+                .status(HttpStatus.OK)
+                .statusCode(HttpStatus.OK.value())
+                .build()
+        );
+    }
+    @PostMapping("/resetpassword/{key}/{passowrd}/{confirmPassword}")
+    public ResponseEntity<HttpResponse> resetPasswordWithUrl(@PathVariable("key") String key, @PathVariable("password") String password, @PathVariable("confirmPassword") String confirmPassword){
+        userService.renewPassword(key, password, confirmPassword);
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                .timeStamp(LocalDateTime.now().toString())
+                .message("Password reset successfully")
+                .status(HttpStatus.OK)
+                .statusCode(HttpStatus.OK.value())
+                .build()
+        );
+    }
+    @GetMapping("/verify/account/{key}")
+    public ResponseEntity<HttpResponse> verifyAccount(@PathVariable("key") String key){
+        UserDTO userDTO = userService.verifyAccount(key);
+        return ResponseEntity.ok().body(
+                HttpResponse.builder()
+                .timeStamp(LocalDateTime.now().toString())
+                .data(Map.of("user", userDTO))
+                .message(userDTO.isEnabled() ? "Account already verified" : "Account verified")
+                .status(HttpStatus.OK)
+                .statusCode(HttpStatus.OK.value())
+                .build()
+        );
+    }
+    @GetMapping("/refresh/token")
+    public ResponseEntity<HttpResponse> refreshToken(HttpServletRequest request){
+        if(isHeaderAndTokenValid(request)){
+            String token = request.getHeader(AUTHORIZATION).substring(TOKEN_PREFIX.length());
+            UserDTO userDTO = userService.getUserByEmail(tokenProvider.getSubject(token, request));
+            return ResponseEntity.ok().body(
+                    HttpResponse.builder()
+                    .timeStamp(LocalDateTime.now().toString())
+                    .data(Map.of("user", userDTO,
+                            "access_token", tokenProvider.createAccessToken(getUserPrincipal(userDTO)),
+                            "refresh_token", token))
+                    .message("Token refreshed")
+                    .status(HttpStatus.OK)
+                    .statusCode(HttpStatus.OK.value())
+                    .build()
+            );
+        }else {
+            return ResponseEntity.ok().body(
+                    HttpResponse.builder()
+                    .timeStamp(LocalDateTime.now().toString())
+                    .reason("Refresh Token missing or invalid")
+                    .status(HttpStatus.BAD_REQUEST)
+                    .statusCode(HttpStatus.BAD_REQUEST.value())
+                    .build()
+            );
+        }
+    }
+
+    @RequestMapping("/error")
+    public ResponseEntity<HttpResponse> handleError(HttpServletRequest request){
+        return ResponseEntity.badRequest().body(
+                HttpResponse.builder()
+                .timeStamp(LocalDateTime.now().toString())
+                .reason("An error occurred. " + request.getMethod())
+                .status(HttpStatus.NOT_FOUND)
+                .statusCode(HttpStatus.NOT_FOUND.value())
+                .build()
+        );
+    }
+
+    private boolean isHeaderAndTokenValid(HttpServletRequest request){
+        return (request.getHeader(AUTHORIZATION) != null) &&
+                (request.getHeader(AUTHORIZATION).startsWith(TOKEN_PREFIX)) &&
+                (tokenProvider.isTokenValid(tokenProvider.getSubject(request.getHeader(AUTHORIZATION).substring(TOKEN_PREFIX.length()),request),
+                        request.getHeader(AUTHORIZATION).substring(TOKEN_PREFIX.length())));
+    }
+
+    private UserDTO getAuthenticatedUser(Authentication authentication){
+        return ((UserPrincipal) authentication.getPrincipal()).getUser();
+    }
+
+    private Authentication authenticate(String email, String password){
+        try{
+            Authentication authentication = authenticationManager.authenticate(unauthenticated(email, password));
+            return authentication;
+        }catch (Exception exception){
+            //processError(request, response, exception);
+            throw new ApiException(exception.getMessage());
+        }
     }
 
     private ResponseEntity<HttpResponse> sendResponse(UserDTO userDTO){

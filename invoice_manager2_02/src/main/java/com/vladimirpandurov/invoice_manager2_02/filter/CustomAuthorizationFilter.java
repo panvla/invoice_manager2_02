@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static com.vladimirpandurov.invoice_manager2_02.utils.ExceptionUtils.processError;
 import static org.springframework.http.HttpHeaders.AUTHORIZATION;
 
 @Component
@@ -29,7 +30,7 @@ import static org.springframework.http.HttpHeaders.AUTHORIZATION;
 public class CustomAuthorizationFilter extends OncePerRequestFilter {
 
     private static final String TOKEN_PREFIX = "Bearer ";
-    private static final String[] PUBLIC_ROUTES = {"/user/login", "/user/verify/code", "/user/register"};
+    private static final String[] PUBLIC_ROUTES = {"/user/login", "/user/verify/code", "/user/register", "/user/refresh/token"};
     private static final String HTTP_OPTIONS_METHOD = "OPTIONS";
     private final TokenProvider tokenProvider;
     protected static final String TOKEN_KEY = "token";
@@ -50,6 +51,7 @@ public class CustomAuthorizationFilter extends OncePerRequestFilter {
             filterChain.doFilter(request, response);
         }catch (Exception exception){
             log.error(exception.getMessage());
+            processError(request, response, exception);
         }
     }
 
